@@ -4,9 +4,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import dendropy as dp
-from phyddle import utilities as phyddle_util
 from typing import Dict, List
 
 
@@ -53,22 +51,23 @@ class TestConvertToNewick(unittest.TestCase):
         tree = dp.Tree.get(data=nwk, schema="newick", rooting="force-rooted")
 
         # A small "dat matrix": rows are characters, columns are taxa.
-        dat = pd.DataFrame(
-            {
-                "t0": [0.111, 1.234],
-                "t1": [0.222, 2.345],
-                "t2": [0.333, 3.456],
-                "t3": [0.444, 4.567],
-            },
-            dtype=float,
-        )
+        dat = {
+            "t0": [0.111, 1.234],
+            "t1": [0.222, 2.345],
+            "t2": [0.333, 3.456],
+            "t3": [0.444, 4.567],
+        }
 
-        encoded = phyddle_util.encode_cblvs(
-            tree,
-            dat,
-            tree_width=4,
-            tree_encode_type="height_only",
-            rescale=False,
+        # Captured from Phyddle 0.3.0 encode_cblvs(tree, dat, tree_width=4,
+        # tree_encode_type="height_only", rescale=False) for the Newick above.
+        encoded = np.array(
+            [
+                [0.7, 0.0, 0.111, 1.234],
+                [0.10000000000000003, 0.2, 0.222, 2.345],
+                [0.5, 0.0, 0.333, 3.456],
+                [0.1, 0.1, 0.444, 4.567],
+            ],
+            dtype=float,
         )
         cblv = encoded[:, 0:2].T.reshape(1, 2, 4)
         char_data = encoded[:, 2:].T.reshape(1, 2, 4)
@@ -77,11 +76,6 @@ class TestConvertToNewick(unittest.TestCase):
         newicks = utils.convert_to_newick(cblv, num_tips, char_data)
         self.assertEqual(len(newicks), 1)
         decoded_tree = dp.Tree.get(data=newicks[0], schema="newick", rooting="force-rooted")
-
-        # print(nwk)
-        # print(dat)
-        # print(newicks)
-
 
         tip_labels = ["t0", "t1", "t2", "t3"]
         np.testing.assert_allclose(
@@ -94,7 +88,7 @@ class TestConvertToNewick(unittest.TestCase):
         observed = _parse_tip_annotations(newicks[0])
         self.assertEqual(set(observed.keys()), set(tip_labels))
         for tip in tip_labels:
-            expected_values = np.round(dat[tip].to_numpy(dtype=float), 2)
+            expected_values = np.round(dat[tip], 2)
             self.assertAlmostEqual(observed[tip]["char_0"], float(expected_values[0]), places=6)
             self.assertAlmostEqual(observed[tip]["char_1"], float(expected_values[1]), places=6)
 

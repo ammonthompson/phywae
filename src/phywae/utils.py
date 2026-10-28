@@ -6,8 +6,6 @@ import torch.nn as nn
 from typing import List, Dict, Tuple, Optional, Union
 import math
 import numpy as np
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.preprocessing import StandardScaler
 import importlib.util
 from matplotlib.backends.backend_pdf import PdfPages
 import matplotlib.pyplot as plt
@@ -16,6 +14,80 @@ import argparse
 import dendropy as dp
 import re
 import pandas as pd
+
+
+class _Transformer:
+    def fit_transform(self, X, y=None, **fit_params):
+        return self.fit(X, y, **fit_params).transform(X)
+
+
+def _state_array(value):
+    return value.detach().cpu().numpy().copy()
+
+
+class StandardScaler(_Transformer):
+    """Column-wise population standardization with NaNs omitted during fit.
+
+    Statistics use float64 accumulation. Transforms preserve float32/float64
+    input precision and return a copy; integer inputs become float64.
+    """
+
+    def __init__(self):
+        self.mean_ = self.var_ = self.scale_ = None
+
+    @staticmethod
+    def _array(X):
+        X = np.asarray(X)
+        if X.dtype not in (np.dtype("float32"), np.dtype("float64")):
+            X = X.astype(np.float64)
+        return X
+
+    def fit(self, X, y=None):
+        X = self._array(X)
+        count = np.sum(~np.isnan(X), axis=0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            self.mean_ = np.nansum(X, axis=0, dtype=np.float64) / count
+            residual = X - self.mean_
+            correction = np.nansum(residual, axis=0, dtype=np.float64)
+            # Corrected two-pass population variance avoids cancellation from
+            # subtracting squared means when observations have large offsets.
+            self.var_ = (
+                np.nansum(residual ** 2, axis=0, dtype=np.float64)
+                - correction ** 2 / count
+            ) / count
+        eps = np.finfo(np.float64).eps
+        constant = self.var_ <= count * eps * self.var_ + (count * self.mean_ * eps) ** 2
+        self.scale_ = np.sqrt(self.var_)
+        self.scale_[constant] = 1.0
+        return self
+
+    def transform(self, X):
+        X = self._array(X).copy(order="K")
+        X -= self.mean_.astype(X.dtype, copy=False)
+        X /= self.scale_.astype(X.dtype, copy=False)
+        return X
+
+    def inverse_transform(self, X):
+        X = self._array(X).copy(order="K")
+        X *= self.scale_.astype(X.dtype, copy=False)
+        X += self.mean_.astype(X.dtype, copy=False)
+        return X
+
+    def state_dict(self):
+        return {
+            "version": 1,
+            "type": type(self).__name__,
+            **{name: torch.from_numpy(getattr(self, name + "_").copy())
+               for name in ("mean", "var", "scale")},
+        }
+
+    @classmethod
+    def from_state_dict(cls, state):
+        scaler = cls()
+        for name in ("mean", "var", "scale"):
+            setattr(scaler, name + "_", _state_array(state[name]))
+        return scaler
+
 
 # Soft clipping functionality
 class SoftClip(nn.Module):
@@ -29,7 +101,7 @@ class SoftClip(nn.Module):
 # these classes work with datasets output from the Format step in Phyddle
 # they are used to normalize the data before training
 # they are used to create a DataSet object. See phywae.TreeDataSet class
-class PositiveStandardScaler(BaseEstimator, TransformerMixin):
+class PositiveStandardScaler(_Transformer):
     # this does not use zero-padded values for standardization.
     def __init__(self):
         super().__init__()
@@ -38,6 +110,7 @@ class PositiveStandardScaler(BaseEstimator, TransformerMixin):
         self.scale_ = None
 
     def fit(self, X, y=None, mask=None):
+        X = np.asarray(X)
         if mask is None:
             mask = X > 0
             mask[:, 0:2] = True  # Always include the first elements
@@ -67,7 +140,24 @@ class PositiveStandardScaler(BaseEstimator, TransformerMixin):
     def inverse_transform(self, X):
         return np.array(X * self.std_ + self.mean_, dtype=np.float32)
 
-class _StandardScalerPhy(BaseEstimator, TransformerMixin):
+    def state_dict(self):
+        return {
+            "version": 1,
+            "type": type(self).__name__,
+            "mean": torch.from_numpy(self.mean_.copy()),
+            "std": torch.from_numpy(self.std_.copy()),
+        }
+
+    @classmethod
+    def from_state_dict(cls, state):
+        scaler = cls()
+        scaler.mean_ = _state_array(state["mean"])
+        scaler.std_ = _state_array(state["std"])
+        scaler.scale_ = scaler.std_
+        return scaler
+
+
+class _StandardScalerPhy(_Transformer):
     """Shared structured-channel bookkeeping for phylogenetic scalers."""
 
     def __init__(self, num_chars, num_chans, max_tips):
@@ -98,9 +188,33 @@ class _StandardScalerPhy(BaseEstimator, TransformerMixin):
             self.cblv_scaler.std_.reshape(tree_shape, order="F"),
         )
 
+    def _set_tree_statistics(self):
+        self.mean_ = self.cblv_scaler.mean_
+        self.std_ = self.scale_ = self.cblv_scaler.std_
+
+    def state_dict(self):
+        char_scaler = getattr(self, "char_scaler", None)
+        return {
+            "version": 1,
+            "type": type(self).__name__,
+            "num_chars": int(self.num_chars),
+            "num_chans": int(self.num_chans),
+            "max_tips": int(self.max_tips),
+            "tree_scaler": self.cblv_scaler.state_dict(),
+            "char_scaler": char_scaler.state_dict() if self.num_chars and char_scaler is not None else None,
+        }
+
+    @classmethod
+    def from_state_dict(cls, state):
+        scaler = cls(state["num_chars"], state["num_chans"], state["max_tips"])
+        scaler.cblv_scaler = PositiveStandardScaler.from_state_dict(state["tree_scaler"])
+        scaler._set_tree_statistics()
+        if hasattr(scaler, "char_scaler") and scaler.num_chars:
+            scaler.char_scaler = StandardScaler.from_state_dict(state["char_scaler"])
+        return scaler
+
 
 class StandardScalerPhyCategorical(_StandardScalerPhy):
-    # this is a modified version of sklearn's StandardScaler.
     # For one-hot encoded categorical data.
     # normalizes the tree data to have mean 0 and std 1.
     # ignores the categorical data
@@ -110,9 +224,7 @@ class StandardScalerPhyCategorical(_StandardScalerPhy):
         # Ensure X is a NumPy array
         X = np.asarray(X)
         self.cblv_scaler.fit(X[:, self.tree_idxs])
-        self.mean_ = self.cblv_scaler.mean_
-        self.std_  = self.cblv_scaler.std_
-        self.scale_ = self.std_
+        self._set_tree_statistics()
         return self
     
     def transform(self, X):
@@ -177,9 +289,7 @@ class StandardScalerPhyContinuous(_StandardScalerPhy):
             char_data[:, ~char_mask.any(axis=0)] = 0.0
             self.char_scaler.fit(char_data)
 
-        self.mean_ = self.cblv_scaler.mean_
-        self.std_ = self.cblv_scaler.std_
-        self.scale_ = self.std_
+        self._set_tree_statistics()
         return self
 
     def transform(self, X):
@@ -207,6 +317,16 @@ class StandardScalerPhyContinuous(_StandardScalerPhy):
                 X[:, self.char_idxs].reshape(-1, self.num_chars)
             ).reshape(len(X), -1)
         return restored
+
+
+def normalizer_from_state_dict(state):
+    """Restore a supported normalizer from its explicit, versioned state."""
+    if state["version"] != 1:
+        raise ValueError("Unsupported normalizer state version")
+    classes = (StandardScaler, PositiveStandardScaler,
+               StandardScalerPhyCategorical, StandardScalerPhyContinuous)
+    normalizers = {cls.__name__: cls for cls in classes}
+    return normalizers[state["type"]].from_state_dict(state)
 
 
 # other functions
@@ -692,8 +812,7 @@ def convert_to_newick(cblv, num_tips, char_data):
 
 
 # DEV
-class ShiftedStandardScaler(BaseEstimator, TransformerMixin):
-    # this is a modified version of sklearn's StandardScaler. 
+class ShiftedStandardScaler(_Transformer):
     # standardizes the data then shifts it to be positive
     # this is used for the cblv-like data
 
@@ -740,7 +859,7 @@ class ShiftedStandardScaler(BaseEstimator, TransformerMixin):
         # Reverse standardization
         return self.scaler.inverse_transform(X_inv)
    
-class NoScalerNormalizer(BaseEstimator, TransformerMixin):
+class NoScalerNormalizer(_Transformer):
     # this just creates a normalizer object that 
     # returns the input data untransformed
     # for compatibility with downstream code
@@ -761,7 +880,7 @@ class NoScalerNormalizer(BaseEstimator, TransformerMixin):
             X = X.detach().cpu().numpy()
         return X.copy() if self.copy else X
 
-class LogitStandardScaler(BaseEstimator, TransformerMixin):
+class LogitStandardScaler(_Transformer):
     """
     Combines a logit transformation with standard scaling.
 
@@ -793,7 +912,7 @@ class LogitStandardScaler(BaseEstimator, TransformerMixin):
         X_logit = self.scaler.inverse_transform(X_scaled)
         return self._sigmoid(X_logit)
     
-class StandardMinMaxScaler(BaseEstimator, TransformerMixin):
+class StandardMinMaxScaler(_Transformer):
     def fit(self, X, y=None):
         X = np.asarray(X)
         self.mean_ = X.mean(axis=0)
@@ -816,7 +935,7 @@ class StandardMinMaxScaler(BaseEstimator, TransformerMixin):
         X_std = ((X_scaled + 1) / 2) * (self.max - self.min) + self.min
         return X_std * self.std_ + self.mean_
     
-class LogScaler(BaseEstimator, TransformerMixin):
+class LogScaler(_Transformer):
     def __init__(self, min_pos = 1e-8):
         super().__init__()
         self.min_positive_values = min_pos
@@ -831,7 +950,7 @@ class LogScaler(BaseEstimator, TransformerMixin):
     def inverse_transform(self, X):
         return(np.exp(X) - self.min_positive_values)    
 
-class LogStandardScaler(BaseEstimator, TransformerMixin):
+class LogStandardScaler(_Transformer):
     def __init__(self, base=np.float32(np.e)):
         super().__init__()
         self.base = base

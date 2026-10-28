@@ -19,9 +19,6 @@ dependencies = [
     "matplotlib >=3.10.0, <4.0",
     "numpy >=2.2.2, <3.0",
     "pandas >=2.2.3, <3.0",
-    "phyddle >=0.3.0, <1.0",
-    "scikit-learn >=1.6.1, <2.0",
-    "setuptools <82",  # Phyddle 0.3 imports pkg_resources, removed in setuptools 82.
     "torch >=2.6.0, <3.0"
 ]
 requires-python = ">=3.12"

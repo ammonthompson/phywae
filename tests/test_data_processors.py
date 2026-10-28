@@ -1,8 +1,9 @@
 import h5py
 import numpy as np
+import pytest
 import torch
 
-from phywae.DataProcessors import AEData
+from phywae.DataProcessors import AEData, _split_train_val
 
 
 def test_ae_data_partitions_all_selected_rows_between_train_and_validation(tmp_path):
@@ -105,3 +106,30 @@ def test_dataloader_uses_ordered_batched_dataset_reads(tmp_path):
     assert calls == [[0, 1, 2, 3]]
     for actual, expected in zip(actual_batch, zip(*expected_samples)):
         torch.testing.assert_close(actual, torch.stack(expected))
+
+
+def test_split_preserves_seeded_order_and_floors_training_count():
+    train, validation = _split_train_val(np.arange(10), 0.65, 123)
+    np.testing.assert_array_equal(train, [8, 3, 1, 6, 9, 2])
+    np.testing.assert_array_equal(validation, [4, 0, 7, 5])
+
+
+def test_unseeded_split_uses_global_numpy_rng():
+    state = np.random.get_state()
+    try:
+        np.random.seed(123)
+        train, validation = _split_train_val(np.arange(10), 0.65, None)
+        np.testing.assert_array_equal(train, [8, 3, 1, 6, 9, 2])
+        np.testing.assert_array_equal(validation, [4, 0, 7, 5])
+        assert np.random.random() == pytest.approx(0.41092437270901894)
+    finally:
+        np.random.set_state(state)
+
+
+@pytest.mark.parametrize("num_rows, fraction", [
+    (0, 0.75), (1, 0.75), (10, 0), (10, 1),
+    (10, -0.1), (10, 1.1), (10, 0.01),
+])
+def test_split_rejects_empty_training_or_validation(num_rows, fraction):
+    with pytest.raises(ValueError, match="both contain rows"):
+        _split_train_val(np.arange(num_rows), fraction, 123)

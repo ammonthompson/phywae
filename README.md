@@ -9,6 +9,9 @@
 **PhyWAE** is a research tool for exploring the use of autoencoders to characterize the probability distribution of **phylogenetic data**, including phylogenies, tip-associated data, and other tree metadata.
 
 It implements a Wasserstein autoencoder with maximum mean discrepancy regularization (**MMD-WAE**) in **PyTorch**.
+Tree, character, and auxiliary normalization use NumPy utilities owned by PhyWAE.
+Model files include fitted normalization state; new models and checkpoints must be
+created after upgrading from the previous scikit-learn-based format.
 
 ## Installation
 
@@ -33,13 +36,18 @@ uv run pytest -q
 
 ## Training
 
-Training requires HDF5 data from [Phyddle's format step](https://phyddle.org/pipeline.html#format). To generate example BiSSE data:
+Training reads HDF5 data in [Phyddle's format](https://phyddle.org/pipeline.html#format).
+Phyddle is an upstream data-generation tool and is not installed with PhyWAE.
+Install and run it in a separate environment to generate example BiSSE data:
 
 ```bash
 cd example/phyddle_sim_data
 phyddle -c phyddle_config.py
 cd ../..
 ```
+
+Return to the PhyWAE environment before training. Research scripts in `scripts/`
+are outside the distributed package and manage their own dependencies.
 
 Edit [`phytrain_config.py`](phytrain_config.py) for your dataset and model:
 

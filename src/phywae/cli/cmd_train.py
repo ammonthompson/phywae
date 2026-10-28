@@ -32,6 +32,16 @@ import phywae.utils as utils
 
 def main(args):
     settings, checkpoint_overrides = _process_settings(args)
+    map_location = None if settings["device"] == "auto" else settings["device"]
+    tree_ae = None
+    if settings["resume_from_checkpoint"] is not None:
+        tree_ae = AETrainer.load_checkpoint(
+            settings["resume_from_checkpoint"], map_location=map_location,
+            **checkpoint_overrides,
+        )
+        settings["seed"] = tree_ae.seed
+    else:
+        _set_seed(settings)
 
     ###################################
     # Set up network training objects #
@@ -49,6 +59,8 @@ def main(args):
                         num_subset       = settings["num_subset"],
                         which_aux        = settings["which_aux"],
                         optimize         = settings["optimize_data"],
+                        phy_normalizer   = tree_ae.model.phy_normalizer if tree_ae else None,
+                        aux_normalizer   = tree_ae.model.aux_normalizer if tree_ae else None,
                         )
     output_files = []
     if settings["optimize_data"] and ae_data.hdf5_file != args.trn_data:
@@ -65,14 +77,7 @@ def main(args):
     
     phy_normalizer, aux_normalizer = ae_data.get_normalizers()
 
-    map_location = None if settings["device"] == "auto" else settings["device"]
-
-    if settings["resume_from_checkpoint"] is not None:
-        tree_ae = AETrainer.load_checkpoint(
-                        settings["resume_from_checkpoint"],
-                        map_location = map_location,
-                        **checkpoint_overrides
-                        )
+    if tree_ae is not None:
         tree_ae.model.validate_data_compatibility(ae_data)
     else:
         # create model
@@ -213,11 +218,6 @@ def _process_settings(args):
 
     if settings["resume_from_checkpoint"] is not None and settings["pretrained_model"] is not None:
         raise ValueError("Cannot specify both --resume_from_checkpoint and --pretrained_model.")
-    if settings["resume_from_checkpoint"] is not None:
-        settings["seed"] = _load_seed_from_checkpoint(settings["resume_from_checkpoint"])
-
-    _set_seed(settings)
-
     checkpoint_overrides = {
         checkpoint_override_names[name]: settings[name]
         for name in overridden_settings
@@ -261,10 +261,6 @@ def add_arguments(parser):
 
 def _get_loss_weights(settings):
     return {k : v for k, v in settings.items() if "_loss_weight" in k}
-
-def _load_seed_from_checkpoint(checkpoint_file: str) -> int:
-    checkpoint = torch.load(checkpoint_file, map_location="cpu", weights_only=False)
-    return int(checkpoint["seed"])
 
 def _set_seed(settings):
     if settings['seed'] is None:

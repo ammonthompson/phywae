@@ -5,7 +5,6 @@ import numpy as np
 from typing import List, Dict, Tuple, Optional, Union
 from phywae import utils
 import random
-import sklearn
 
 class ResCnnEncoder(nn.Module):
     def __init__(self, data_channels, data_width, layer_params):

@@ -55,6 +55,8 @@ class AETrainer(object):
         val_metrics (_LossMetricTracker): Validation loss metric history.
     """
 
+    _CHECKPOINT_VERSION = 7
+
     def __init__(self,
                  model: AECNN,
                  optimizer : torch.optim.Optimizer, 
@@ -498,7 +500,7 @@ class AETrainer(object):
             )
 
         checkpoint = {
-            'checkpoint_version': 6,
+            'checkpoint_version': self._CHECKPOINT_VERSION,
             'model': self.model,
             'seed': self.seed,
             'epoch': self.epoch,
@@ -532,8 +534,6 @@ class AETrainer(object):
         Trainer configuration is restored from the checkpoint unless an explicit
         override is supplied. DataLoaders remain external and must be reattached
         with ``set_data_loaders()``, which restores their saved generator states.
-        For older checkpoints with separate objectives, the training objective
-        becomes the shared objective.
 
         Args:
             filename (str): Checkpoint file produced by ``save_checkpoint()``.
@@ -543,27 +543,18 @@ class AETrainer(object):
             checkpt_file_prefix (str, optional): Override the saved checkpoint prefix.
         """
         checkpoint = torch.load(filename, map_location=map_location, weights_only=False)
-        if 'model' not in checkpoint:
+        if checkpoint.get('checkpoint_version') != cls._CHECKPOINT_VERSION:
             raise ValueError(
-                "Unsupported legacy checkpoint format. "
-                "Expected a checkpoint saved with pickled model/optimizer/scheduler/loss objects."
+                "Unsupported checkpoint format. "
+                "Recreate the checkpoint with the current training pipeline."
             )
 
         model = checkpoint['model']
         opt = checkpoint['optimizer']
         lr_sched = checkpoint['lr_scheduler']
-        legacy_train_loss = checkpoint.get('train_loss')
-        legacy_val_loss = checkpoint.get('val_loss')
-        if 'loss' in checkpoint:
-            loss = checkpoint['loss']
-        elif legacy_train_loss is not None:
-            loss = legacy_train_loss
-        else:
-            loss = legacy_val_loss
-        if loss is None:
-            raise ValueError("Checkpoint does not contain a loss object.")
-        loss_metric_state = checkpoint.get('loss_metric_state')
-        trainer_state = checkpoint.get('trainer_state', {})
+        loss = checkpoint['loss']
+        loss_metric_state = checkpoint['loss_metric_state']
+        trainer_state = checkpoint['trainer_state']
 
         if map_location is None:
             load_device = trainer_state.get('device', "auto")
@@ -599,20 +590,8 @@ class AETrainer(object):
             checkpt_file_prefix=restored_prefix,
         )
         self.epoch = checkpoint['epoch']
-        if loss_metric_state is None:
-            self.train_metrics.load_legacy_loss_history(
-                legacy_train_loss
-                if legacy_train_loss is not None else self.loss
-            )
-            self.val_metrics.load_legacy_loss_history(
-                legacy_val_loss
-                if legacy_val_loss is not None else self.loss
-            )
-        else:
-            self.train_metrics.load_state_dict(loss_metric_state.get('train', {}))
-            self.val_metrics.load_state_dict(
-                loss_metric_state.get('validation', {})
-            )
+        self.train_metrics.load_state_dict(loss_metric_state['train'])
+        self.val_metrics.load_state_dict(loss_metric_state['validation'])
         if restored_track_grad and saved_track_grad:
             self.batch_layer_grad_norm = trainer_state.get(
                 'batch_layer_grad_norm', self.batch_layer_grad_norm
@@ -761,27 +740,6 @@ class _LossMetricTracker:
             for name in _LOSS_METRIC_NAMES
         }
 
-    def load_legacy_loss_history(self, loss):
-        """Move history fields from a loss object saved by an older checkpoint."""
-        if loss is None:
-            return
-
-        for period, destination in (
-                ("epoch", self.epoch_history), ("batch", self._batch_history)):
-            for name in _LOSS_METRIC_NAMES:
-                for attribute in (
-                        f"{period}_{name}_loss_history", f"{period}_{name}_loss"):
-                    if not hasattr(loss, attribute):
-                        continue
-                    values = list(getattr(loss, attribute))
-                    if period == "batch":
-                        values = [value.detach() for value in values]
-                    destination[name] = values
-                    delattr(loss, attribute)
-                    break
-
-        if hasattr(loss, "validation"):
-            delattr(loss, "validation")
 
 # module functions
 def _print_latest_loss_metrics(metrics, label, elapsed_time, print_epoch=False):

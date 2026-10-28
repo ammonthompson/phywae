@@ -4,9 +4,7 @@ from typing import List, Optional, Tuple, Union
 
 import h5py
 import numpy as np
-import sklearn.preprocessing as pp
 import torch
-from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 
 import phywae.utils as utils
@@ -142,6 +140,8 @@ class AEData:
         num_subset: Optional[Union[int, str]] = None,
         which_aux: Union[str, List[str]] = "all",
         optimize: bool = False,
+        phy_normalizer=None,
+        aux_normalizer=None,
     ):
         """Create data splits, fit normalizers, and build lazy datasets.
 
@@ -169,6 +169,11 @@ class AEData:
             optimize: Create or reuse a contiguous ``.phywae.hdf5`` copy when
                 the input layout is inefficient for shuffled batch reads. The
                 original file is never changed.
+            phy_normalizer: Fitted structured normalizer to reuse, for example
+                when resuming a saved model. Supply together with
+                ``aux_normalizer`` to skip fitting on this file.
+            aux_normalizer: Fitted auxiliary normalizer matching the selected
+                columns, in the order specified by ``which_aux``.
 
         Returns:
             None. The constructed object exposes datasets, normalizers, and
@@ -189,16 +194,20 @@ class AEData:
             rows = np.arange(_nrows(num_subset, h5["phy_data"].shape[0]), dtype=np.int64)
             aux_names = _decode_names(h5["aux_data_names"][...])
             self.aux_colnames, aux_indices = _select_aux(aux_names, which_aux)
+            self.aux_width = len(aux_indices)
             self.ntax_cidx = _num_taxa_index(self.aux_colnames)
             num_tips_aux_index = int(aux_indices[self.ntax_cidx])
 
             train_idx, val_idx = _split_train_val(rows, self.prop_train, seed)
 
-            train_phy = _read_phy(h5, train_idx, self.num_channels, self.max_tips)
-            train_aux = _read_aux(h5, train_idx, aux_indices)
-            self._fit_normalizers(train_phy, train_aux)
+            if phy_normalizer is None:
+                train_phy = _read_phy(h5, train_idx, self.num_channels, self.max_tips)
+                train_aux = _read_aux(h5, train_idx, aux_indices)
+                self._fit_normalizers(train_phy, train_aux)
+            else:
+                self.phy_normalizer = phy_normalizer
+                self.aux_normalizer = aux_normalizer
 
-        self.aux_width = len(aux_indices)
         self.train_phy_shape = (len(train_idx), self.num_channels * self.max_tips)
         self.val_phy_shape = (len(val_idx), self.num_channels * self.max_tips)
         self.train_aux_shape = (len(train_idx), self.aux_width)
@@ -230,7 +239,7 @@ class AEData:
             ).fit(phy)
         else:
             raise ValueError("char_data_type must be 'continuous' or 'categorical'")
-        self.aux_normalizer = pp.StandardScaler().fit(aux)
+        self.aux_normalizer = utils.StandardScaler().fit(aux)
 
     def get_datasets(self) -> Tuple[Dataset, Dataset]:
         """Return the training and validation datasets.
@@ -249,9 +258,9 @@ class AEData:
 
         Returns:
             Tuple ``(phy_normalizer, aux_normalizer)``. ``phy_normalizer`` is a
-            sklearn-like transformer fitted on flattened training ``phy_data``
+            structured transformer fitted on flattened training ``phy_data``
             with shape ``(N_train, num_channels * max_tips)``.
-            ``aux_normalizer`` is a ``sklearn.preprocessing.StandardScaler``
+            ``aux_normalizer`` is a ``utils.StandardScaler``
             fitted on training auxiliary data with shape
             ``(N_train, aux_width)``.
         """
@@ -327,9 +336,9 @@ class TreeDataSet(Dataset):
             indices: One-dimensional sequence of integer row indices into the
                 HDF5 datasets. Dataset index ``i`` maps to HDF5 row
                 ``indices[i]``.
-            phy_normalizer: Fitted sklearn-like transformer for flattened
+            phy_normalizer: Fitted transformer for flattened
                 structured rows with shape ``(1, num_channels * max_tips)``.
-            aux_normalizer: Fitted sklearn-like transformer for selected
+            aux_normalizer: Fitted transformer for selected
                 auxiliary rows with shape ``(1, aux_width)``.
             max_tips: Structured matrix width before padding with zeros.
             num_channels: Number of structured channels to read from
@@ -542,12 +551,13 @@ def _nrows(num_subset, total_rows):
 
 
 def _split_train_val(rows, prop_train, seed):
-    return train_test_split(
-        rows,
-        train_size=int(float(prop_train) * len(rows)),
-        shuffle=True,
-        random_state=seed,
-    )
+    num_train = int(float(prop_train) * len(rows))
+    if not 0 < num_train < len(rows):
+        raise ValueError("Training and validation splits must both contain rows")
+    rng = np.random if seed is None else np.random.RandomState(seed)
+    shuffled = rng.permutation(len(rows))
+    num_val = len(rows) - num_train
+    return rows[shuffled[num_val:]], rows[shuffled[:num_val]]
 
 
 def _read_rows(dataset, indices):

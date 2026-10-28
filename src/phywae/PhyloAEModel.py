@@ -6,7 +6,6 @@ from typing import List, Dict, Tuple, Optional, Union
 from phywae import utils
 from phywae.ResNet import ResCnnEncoder, ResCnnDecoder
 import random
-import sklearn
 
 class AECNN(nn.Module):
     """Autoencoder for structured phylogenetic tensors plus auxiliary features.
@@ -33,10 +32,7 @@ class AECNN(nn.Module):
         you want the model to handle normalization/denormalization.
     """
 
-    _LEGACY_DERIVED_BUFFER_KEYS = (
-        "phy_two_sided_ReLU.min_val",
-        "phy_two_sided_ReLU.max_val",
-    )
+    _MODEL_FORMAT_VERSION = 1
 
     def __init__(self, 
                  num_structured_input_channel, 
@@ -89,10 +85,8 @@ class AECNN(nn.Module):
             device (str): ``"auto"``, ``"cpu"``, or ``"cuda"``. If ``"auto"``, selects CUDA when
                 available. Defaults to ``"auto"``.
             seed (Optional[int]): Random seed for Python, NumPy, and PyTorch. Defaults to None.
-            phy_normalizer: Required. Fitted scaler for structured data with ``mean_`` and ``std_``
-                attributes and ``transform``/``inverse_transform`` methods (sklearn-like).
-            aux_normalizer: Required. Fitted scaler for auxiliary data with ``mean_`` and ``var_``
-                attributes and ``transform``/``inverse_transform`` methods (sklearn-like).
+            phy_normalizer: Fitted structured-data normalizer or its versioned state.
+            aux_normalizer: Fitted auxiliary-data normalizer or its versioned state.
 
         Raises:
             ValueError: If ``stride``, ``kernel``, and ``out_channels`` lengths differ.
@@ -116,7 +110,7 @@ class AECNN(nn.Module):
         self.char_type = char_type
         self.num_chars = num_chars
         self.aux_numtips_idx = aux_numtips_idx
-        self.aux_data_names = aux_data_names
+        self.aux_data_names = None if aux_data_names is None else np.asarray(aux_data_names)
         self.num_structured_input_channel = num_structured_input_channel
         self.structured_input_width       = structured_input_width
         self.unstructured_input_width     = unstructured_input_width
@@ -444,6 +438,10 @@ class AECNN(nn.Module):
 
     def set_normalizers(self, phy_normalizer, aux_normalizer) -> None:
         """Replace fitted normalizers and refresh normalization-dependent bounds."""
+        if isinstance(phy_normalizer, dict):
+            phy_normalizer = utils.normalizer_from_state_dict(phy_normalizer)
+        if isinstance(aux_normalizer, dict):
+            aux_normalizer = utils.normalizer_from_state_dict(aux_normalizer)
         self.phy_normalizer = phy_normalizer
         self.aux_normalizer = aux_normalizer
 
@@ -460,6 +458,20 @@ class AECNN(nn.Module):
         self.phy_two_sided_ReLU = TwoSidedReLU(phy_lower_bound, phy_upper_bound)
         self.phy_two_sided_ReLU.train(self.training)
 
+    def normalizer_state_dict(self):
+        """Return the fitted normalization state for model and trainer saves."""
+        return {name: getattr(self, name).state_dict()
+                for name in ("phy_normalizer", "aux_normalizer")}
+
+    def __getstate__(self):
+        state = super().__getstate__()
+        state.update(self.normalizer_state_dict())
+        return state
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        self.set_normalizers(self.phy_normalizer, self.aux_normalizer)
+
     def get_config_dict(self) -> Dict[str, object]:
         """Return constructor kwargs to recreate this model's configuration."""
         return {
@@ -469,7 +481,10 @@ class AECNN(nn.Module):
             "unstructured_latent_width": self.unstructured_latent_width,
             "aux_inner_dim": self.aux_inner_dim,
             "aux_numtips_idx": self.aux_numtips_idx,
-            "aux_data_names" : self.aux_data_names,
+            "aux_data_names": None if self.aux_data_names is None else [
+                name.decode() if isinstance(name, (bytes, np.bytes_)) else str(name)
+                for name in np.asarray(self.aux_data_names).reshape(-1)
+            ],
             "num_chars": self.num_chars,
             "char_type": self.char_type,
             "stride": list(self.layer_params["stride"]),
@@ -478,8 +493,7 @@ class AECNN(nn.Module):
             "latent_output_dim": self.layer_params.get("latent_dim"),
             "device": getattr(self, "device_setting", self.device),
             "seed": getattr(self, "seed", None),
-            "phy_normalizer": self.phy_normalizer,
-            "aux_normalizer": self.aux_normalizer,
+            **self.normalizer_state_dict(),
         }
 
     def validate_data_compatibility(self, data) -> None:
@@ -648,29 +662,10 @@ class AECNN(nn.Module):
         model_settings = self.get_config_dict()
         model_state_dict = self.state_dict()
         torch.save({
+            "model_format_version": self._MODEL_FORMAT_VERSION,
             "model_config": model_settings,
             "model_state_dict": model_state_dict,
-            "seed": self.seed,
         }, filename)
-        # torch.save(self.model, filename)
-
-    def repair_legacy_state_dict(self, model_state_dict):
-        """Backfill derived buffers omitted from older serialized models.
-
-        These buffers are deterministically reconstructed from the saved normalizers during
-        ``__init__`` and therefore do not need to be authoritative in older state dicts.
-        """
-        missing_legacy_keys = [
-            key for key in self._LEGACY_DERIVED_BUFFER_KEYS if key not in model_state_dict
-        ]
-        if not missing_legacy_keys:
-            return model_state_dict
-
-        repaired_state_dict = model_state_dict.copy()
-        current_state_dict = self.state_dict()
-        for key in missing_legacy_keys:
-            repaired_state_dict[key] = current_state_dict[key]
-        return repaired_state_dict
 
     @classmethod
     def load_pretrained_from_file(
@@ -678,7 +673,7 @@ class AECNN(nn.Module):
         trained_model_fn: str,
         map_location: Optional[Union[str, torch.device]] = "cpu") -> "AECNN":
         """
-        Load a model artifact, trainer checkpoint, or old full-object save.
+        Load a model artifact or trainer checkpoint with native normalization.
 
         Args:
             trained_model_fn (str): Input file.
@@ -688,46 +683,23 @@ class AECNN(nn.Module):
         """
         model_obj = torch.load(trained_model_fn, map_location=map_location, weights_only=False)
         if isinstance(model_obj, dict) and isinstance(model_obj.get("model"), cls):
-            model_obj = model_obj["model"]
-
-        # new saved format
-        if isinstance(model_obj, dict) and "model_config" in model_obj:
+            trained_model = model_obj["model"]
+        elif (isinstance(model_obj, dict)
+              and model_obj.get("model_format_version") == cls._MODEL_FORMAT_VERSION):
             model_config = dict(model_obj["model_config"])
-            legacy_latent_type = model_config.pop("latent_layer_type", "GAUSS")
-            if legacy_latent_type != "GAUSS":
-                raise ValueError(
-                    f"Unsupported legacy latent layer type: {legacy_latent_type}. "
-                    "Only Gaussian latent models are supported."
-                )
-            if "seed" not in model_config and "seed" in model_obj:
-                model_config["seed"] = model_obj["seed"]
-            # If caller pins load device, construct module on that device to avoid CUDA-init errors.
-            if map_location is not None and isinstance(map_location, (str, torch.device)):
+            if map_location is not None:
                 model_config["device"] = str(map_location)
-
             trained_model = cls(**model_config)
-            model_state_dict = trained_model.repair_legacy_state_dict(model_obj['model_state_dict'])
-            trained_model.load_state_dict(model_state_dict)
-            if map_location is not None:
-                trained_model.to(map_location)
-            trained_model.eval()
-            return trained_model
-        
-        # old saved format (remove?)
-        if isinstance(model_obj, cls):
-            legacy_latent_type = getattr(model_obj, "latent_layer_type", "GAUSS")
-            if legacy_latent_type != "GAUSS":
-                raise ValueError(
-                    f"Unsupported legacy latent layer type: {legacy_latent_type}. "
-                    "Only Gaussian latent models are supported."
-                )
-            if map_location is not None:
-                model_obj.to(map_location)
-            model_obj.eval()
-            return model_obj
-        
-        raise ValueError(f"Wrong model format in {trained_model_fn}. "
-        "Expected an AECNN object, model artifact, or trainer checkpoint containing an AECNN model.")
+            trained_model.load_state_dict(model_obj["model_state_dict"])
+        else:
+            raise ValueError(
+                f"Unsupported model format in {trained_model_fn}. "
+                "Recreate the model with the current training pipeline."
+            )
+        if map_location is not None:
+            trained_model.to(map_location)
+        trained_model.eval()
+        return trained_model
 
 # encoder classes
 class DenseEncoder(nn.Module):
