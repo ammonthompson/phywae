@@ -1,4 +1,4 @@
-# PhyWAE 0.2.0
+# PhyWAE 0.3.0
 ![status](https://img.shields.io/badge/status-active--development-orange)
 
 <p align="center">
@@ -10,12 +10,21 @@
 
 It implements a Wasserstein autoencoder with maximum mean discrepancy regularization (**MMD-WAE**) in **PyTorch**.
 Tree, character, and auxiliary normalization use NumPy utilities owned by PhyWAE.
-Model files include fitted normalization state; new models and checkpoints must be
-created after upgrading from the previous scikit-learn-based format.
+Models and checkpoints created before version 0.3 with the old scikit-learn-based
+normalization format are incompatible and must be regenerated or explicitly
+converted to the new format.
 
 ## Installation
 
-Requires Python 3.12 or newer. From the cloned repo's root:
+Requires Python 3.12 or later. Intel Macs use PyTorch 2.2.2 and NumPy 1.26.4 or
+later, below 2. Other supported platforms, including Apple Silicon Macs, use
+PyTorch 2.6 or later (below 3) and NumPy 2.2.2 or later (below 3). These requirements
+are selected automatically by platform.
+
+GPU users should select an official PyTorch build compatible with their NVIDIA
+driver; downstream projects are responsible for selecting and locking that build.
+
+From the cloned repo's root:
 
 ```bash
 python3.12 -m venv .venv
@@ -26,13 +35,6 @@ python -m pip install .
 
 For development, use `python -m pip install -e . --group dev` and run
 `python -m pytest -q`.
-
-Optional development setup with locked dependencies using [uv](https://docs.astral.sh/uv/getting-started/installation/):
-
-```bash
-uv sync --locked --dev
-uv run pytest -q
-```
 
 ## Training
 

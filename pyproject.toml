@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "phywae"
-version = "0.2.0"
+version = "0.3.0"
 description = "PhyWAE: a phylogenetic Wasserstein autoencoder for Phyddle-formatted data."
 readme = "README.md"
 authors = [
@@ -17,9 +17,11 @@ dependencies = [
     "dendropy >=5.0.8, <6.0",
     "h5py >=3.12.1, <4.0",
     "matplotlib >=3.10.0, <4.0",
-    "numpy >=2.2.2, <3.0",
+    "numpy>=1.26.4,<2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "numpy>=2.2.2,<3; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "pandas >=2.2.3, <3.0",
-    "torch >=2.6.0, <3.0"
+    "torch==2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "torch>=2.6,<3; sys_platform != 'darwin' or platform_machine != 'x86_64'"
 ]
 requires-python = ">=3.12"
 
@@ -38,4 +40,4 @@ exclude = ["sandbox/**", "*.egg-info/**", "__pycache__/**", "*.pyc", "*.pyo", "*
 packages = ["src/phywae"]
 
 [tool.hatch.build.targets.sdist]
-only-include = ["src", "docs", "example", "README.md", "pyproject.toml", "phytrain_config.py", ".python-version", "uv.lock"]
+only-include = ["src", "docs", "example", "README.md", "pyproject.toml", "phytrain_config.py", ".python-version"]
