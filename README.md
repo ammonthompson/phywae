@@ -14,6 +14,8 @@ Models and checkpoints created before version 0.3 with the old scikit-learn-base
 normalization format are incompatible and must be regenerated or explicitly
 converted to the new format.
 
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
 ## Installation
 
 Requires Python 3.12 or later. Intel Macs use PyTorch 2.2.2 and NumPy 1.26.4 or

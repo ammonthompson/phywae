@@ -40,4 +40,4 @@ exclude = ["sandbox/**", "*.egg-info/**", "__pycache__/**", "*.pyc", "*.pyo", "*
 packages = ["src/phywae"]
 
 [tool.hatch.build.targets.sdist]
-only-include = ["src", "docs", "example", "README.md", "pyproject.toml", "phytrain_config.py", ".python-version"]
+only-include = ["src", "docs", "example", "README.md", "CHANGELOG.md", "pyproject.toml", "phytrain_config.py", ".python-version"]
